@@ -1,26 +1,35 @@
-export class AudioService {
-    private audioStreams: Map<string, Buffer[]>;
+import { Buffer } from 'buffer';
 
-    constructor() {
-        this.audioStreams = new Map();
-    }
+import { AudioChunkMeta } from '../types';
+import { nowNs } from '../utils/time';
 
-    public receiveAudio(deviceId: string, audioData: Buffer): void {
-        if (!this.audioStreams.has(deviceId)) {
-            this.audioStreams.set(deviceId, []);
-        }
-        this.audioStreams.get(deviceId)?.push(audioData);
-    }
+type StoredChunk = {
+    meta: AudioChunkMeta;
+    buffer: Buffer;
+    serverAlignedNs: bigint;
+    receivedAtNs: bigint;
+};
 
-    public getAudio(deviceId: string): Buffer[] | undefined {
-        return this.audioStreams.get(deviceId);
-    }
+const perDeviceBuffers = new Map<string, StoredChunk[]>();
 
-    public clearAudio(deviceId: string): void {
-        this.audioStreams.delete(deviceId);
-    }
+export function pushChunk(meta: AudioChunkMeta, buffer: Buffer, alignedServerNs: bigint) {
+    const entry: StoredChunk = {
+        meta,
+        buffer,
+        serverAlignedNs: alignedServerNs,
+        receivedAtNs: nowNs()
+    };
+    const arr = perDeviceBuffers.get(meta.deviceId) || [];
+    arr.push(entry);
+    perDeviceBuffers.set(meta.deviceId, arr);
+    // Keep small in-memory buffer (configurable). For now, cap at 1000 chunks.
+    if (arr.length > 1000) arr.shift();
+}
 
-    public getAllAudioStreams(): Map<string, Buffer[]> {
-        return this.audioStreams;
-    }
+export function getDeviceBuffer(deviceId: string) {
+    return perDeviceBuffers.get(deviceId) || [];
+}
+
+export function listDevices() {
+    return Array.from(perDeviceBuffers.keys());
 }

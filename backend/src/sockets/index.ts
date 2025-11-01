@@ -1,23 +1,11 @@
 import { Server } from 'socket.io';
+import { attachAudioHandlers } from './audioSocket';
 
-const setupSocketServer = (httpServer) => {
-    const io = new Server(httpServer);
-
+export function setupSocket(io: Server) {
     io.on('connection', (socket) => {
-        console.log('New client connected:', socket.id);
-
-        socket.on('audioStream', (data) => {
-            // Handle incoming audio stream data
-            console.log('Received audio stream from device:', socket.id);
-            // Process the audio data here
-        });
-
-        socket.on('disconnect', () => {
-            console.log('Client disconnected:', socket.id);
-        });
+        console.log(`socket connected: ${socket.id}`);
+        attachAudioHandlers(socket);
     });
+}
 
-    return io;
-};
-
-export default setupSocketServer;
+export default setupSocket;
