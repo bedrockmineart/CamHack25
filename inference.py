@@ -54,23 +54,24 @@ def pad_logmel(logmel, max_T=MAX_T):
         logmel = logmel[:, :max_T]
     return logmel
 
-def preprocess_audio_for_inference(audio_path, sr=SR, fixed_len=FIXED_LEN, max_T=MAX_T):
-    """
-    Loads a raw test audio file, segments it into keystrokes,
-    extracts log-Mel features, and returns a tensor dataset for inference.
-    """
-    y, sr = librosa.load(audio_path, sr=sr)
-    segments = segment_fixed(y, sr)
+# ---- Real-time preprocessing ----
+def preprocess_single_segment(segment, sr=SR, max_T=MAX_T):
+    """Convert a fixed-length audio segment to normalized log-Mel tensor."""
+    mel = librosa.feature.melspectrogram(
+        y=segment, sr=sr, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP
+    )
+    logmel = librosa.power_to_db(mel, ref=np.max)
 
-    logmels = []
-    for seg in segments:
-        logmel = extract_logmel(seg, sr)
-        logmel = pad_logmel(logmel, max_T)
-        logmels.append(logmel)
+    # Pad or truncate to consistent width
+    if logmel.shape[1] < max_T:
+        logmel = np.pad(logmel, ((0,0), (0, max_T - logmel.shape[1])))
+    elif logmel.shape[1] > max_T:
+        logmel = logmel[:, :max_T]
 
-    X = np.stack(logmels)
-    X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(1)  # (N,1,64,max_T)
-    return X_tensor
+    # Convert to tensor with channel dim
+    X = torch.tensor(logmel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,n_mels,max_T)
+    return X
+
 
 class KeyDataset(Dataset):
     def __init__(self, npz_file, mean=None, std=None):
@@ -98,7 +99,7 @@ class KeyDataset(Dataset):
         y = self.y[i]
         return X, y
 
-  # ========================
+# ========================
 # MODEL
 # ========================
 
@@ -149,9 +150,12 @@ class KeyCNN(nn.Module):
 
 model_path = 'https://github.com/bedrockmineart/CamHack25/blob/main/CamHack25Model%20(1).pth'
 
-model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)  # adjust num_classes and dropout if needed
-checkpoint = torch.load(model_path, weights_only=False)
+model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)
+
+checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
+
 model.load_state_dict(checkpoint["model_state"])
+
 
 def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None, device=None):
     """
@@ -236,3 +240,4 @@ def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None
         label = label_encoder.inverse_transform([pred_idx])[0]
 
     return label
+
