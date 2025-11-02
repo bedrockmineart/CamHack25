@@ -1,188 +1,96 @@
 import * as socketServer from './socketServer';
-import * as calibrationService from './calibrationService';
-import { nowNs } from '../utils/time';
 
 export type Phase = 
-  | 'joining'
-  | 'start-mic'
-  | 'place-close'
-  | 'play-tone'
-  | 'place-keyboard'
-  | 'keyboard-calibration'
-  | 'operation'
-  | 'idle';
-
-// Diverse keys across the keyboard for proper calibration
-const CALIBRATION_KEYS = ['q', 'p', 'a', 'l', 'space'];
+  | 'idle'
+  | 'placement'
+  | 'operation';
 
 interface SessionState {
   phase: Phase;
-  expectedDevices: string[];
-  micConfirmed: Set<string>;
-  keypresses: Map<string, any[]>; // deviceId -> array of keypress events
-  currentKeyIndex: number;
-  calibrationKeys: string[];
-  tonePlayedAtNs: bigint | null; // When monitor played calibration tone
+  deviceId: string | null;
+  micConfirmed: boolean;
 }
 
 let state: SessionState = {
   phase: 'idle',
-  expectedDevices: [],
-  micConfirmed: new Set(),
-  keypresses: new Map(),
-  currentKeyIndex: 0,
-  calibrationKeys: CALIBRATION_KEYS,
-  tonePlayedAtNs: null
+  deviceId: null,
+  micConfirmed: false
 };
 
-export function setExpectedDevices(deviceIds: string[]) {
-  state.expectedDevices = deviceIds;
-}
-
-export function startJoining() {
-  state.phase = 'joining';
-  state.micConfirmed.clear();
-  state.keypresses.clear();
-  // Don't lock devices yet - wait for start-mic
-  broadcastPhase('joining');
-  broadcastStatus();
-  return { success: true, phase: state.phase };
-}
-
-export function startMicPhase() {
-  // Lock in the currently connected devices as the expected devices for this session
+export function startSession() {
   const connectedDevices = socketServer.getConnectedDevices();
+  
   if (connectedDevices.length === 0) {
-    console.warn('[PHASE] No devices connected, cannot start mic phase');
+    console.warn('[PHASE] No devices connected');
     return { success: false, error: 'No devices connected', phase: state.phase };
   }
   
-  state.expectedDevices = connectedDevices;
-  console.log(`[PHASE] Locked in expected devices: ${state.expectedDevices.join(', ')}`);
+  if (connectedDevices.length > 1) {
+    console.warn('[PHASE] Multiple devices detected. This system only supports single device.');
+    return { success: false, error: 'Only single device supported', phase: state.phase };
+  }
   
-  state.phase = 'start-mic';
-  broadcastPhase('start-mic');
-  // Tell all devices to start their microphones
+  state.deviceId = connectedDevices[0];
+  state.phase = 'placement';
+  state.micConfirmed = false;
+  
+  console.log(`[PHASE] Starting session with device ${state.deviceId}`);
+  
+  // Tell device to start microphone
   socketServer.emitToAll('start-mic', {});
+  
+  // Show placement instructions
+  broadcastPhase('placement');
+  socketServer.emitToAll('show-placement', {
+    message: 'Place your phone in the center of the keyboard, with the microphone facing the keys.'
+  });
+  
   broadcastStatus();
   return { success: true, phase: state.phase };
 }
 
 export function markMicConfirmed(deviceId: string) {
-  state.micConfirmed.add(deviceId);
-  console.log(`[PHASE] Mic confirmed for ${deviceId}. Total: ${state.micConfirmed.size}/${state.expectedDevices.length}`);
-  broadcastStatus();
-}
-
-export function promptPlaceClose() {
-  state.phase = 'place-close';
-  broadcastPhase('place-close');
-  socketServer.emitToAll('prompt-place-close', {});
-  broadcastStatus();
-  return { success: true, phase: state.phase };
-}
-
-export function broadcastPlayTone(deviceId?: string) {
-  // Record when tone is played (server time)
-  state.tonePlayedAtNs = nowNs();
-  console.log(`[PHASE] Calibration tone played at server time: ${state.tonePlayedAtNs}`);
-  
-  // Start calibration mode to detect peaks, pass the tone play time
-  calibrationService.startCalibration(state.tonePlayedAtNs);
-  
-  state.phase = 'play-tone';
-  broadcastPhase('play-tone');
-  if (deviceId) {
-    socketServer.emitToDevice(deviceId, 'play-calibration-tone', {});
-  } else {
-    socketServer.emitToAll('play-calibration-tone', {});
+  if (deviceId === state.deviceId) {
+    state.micConfirmed = true;
+    console.log(`[PHASE] Mic confirmed for ${deviceId}`);
+    broadcastStatus();
   }
-  broadcastStatus();
-  return { success: true, phase: state.phase };
 }
 
-export function promptPlaceKeyboard() {
-  state.phase = 'place-keyboard';
-  broadcastPhase('place-keyboard');
-  socketServer.emitToAll('prompt-place-keyboard', {});
-  broadcastStatus();
-  return { success: true, phase: state.phase };
-}
-
-export function startKeyboardCalibration() {
-  state.phase = 'keyboard-calibration';
-  state.keypresses.clear();
-  state.currentKeyIndex = 0;
-  broadcastPhase('keyboard-calibration');
-  // Tell devices which key to calibrate first
-  socketServer.emitToAll('calibrate-key', { 
-    key: state.calibrationKeys[0],
-    keyIndex: 0,
-    totalKeys: state.calibrationKeys.length
-  });
-  broadcastStatus();
-  return { success: true, phase: state.phase };
-}
-
-export function nextCalibrationKey() {
-  if (state.phase !== 'keyboard-calibration') {
-    return { success: false, error: 'Not in keyboard calibration phase' };
+export function startOperation() {
+  if (state.phase !== 'placement') {
+    return { success: false, error: 'Must be in placement phase' };
   }
   
-  state.currentKeyIndex++;
-  
-  // Check if we've completed all keys
-  if (state.currentKeyIndex >= state.calibrationKeys.length) {
-    console.log('[PHASE] Keyboard calibration complete');
-    return finishOperation();
+  if (!state.micConfirmed) {
+    return { success: false, error: 'Microphone not confirmed' };
   }
   
-  const currentKey = state.calibrationKeys[state.currentKeyIndex];
-  console.log(`[PHASE] Moving to calibration key ${state.currentKeyIndex + 1}/${state.calibrationKeys.length}: ${currentKey}`);
-  
-  // Tell devices which key to calibrate next
-  socketServer.emitToAll('calibrate-key', { 
-    key: currentKey,
-    keyIndex: state.currentKeyIndex,
-    totalKeys: state.calibrationKeys.length
-  });
-  broadcastStatus();
-  
-  return { 
-    success: true, 
-    currentKey,
-    keyIndex: state.currentKeyIndex,
-    totalKeys: state.calibrationKeys.length
-  };
-}
-
-export function recordKeypress(deviceId: string, data: any) {
-  if (!state.keypresses.has(deviceId)) {
-    state.keypresses.set(deviceId, []);
-  }
-  state.keypresses.get(deviceId)!.push(data);
-  console.log(`[PHASE] Keypress recorded for ${deviceId}. Total for device: ${state.keypresses.get(deviceId)!.length}`);
-  broadcastStatus();
-}
-
-export function finishOperation() {
   state.phase = 'operation';
   broadcastPhase('operation');
+  socketServer.emitToAll('start-operation', {});
+  
+  // Start inference service
+  const inferenceService = require('./inferenceService');
+  if (state.deviceId) {
+    inferenceService.startInference(state.deviceId);
+  }
+  
   broadcastStatus();
-  return { success: true, phase: state.phase, message: 'Calibration complete. System operational.' };
+  console.log('[PHASE] Operation started');
+  return { success: true, phase: state.phase, message: 'System is now listening for keystrokes.' };
 }
 
 export function resetSession() {
   console.log('[PHASE] Resetting session to idle');
-  state.phase = 'idle';
-  state.expectedDevices = [];
-  state.micConfirmed.clear();
-  state.keypresses.clear();
-  state.currentKeyIndex = 0;
-  state.tonePlayedAtNs = null;
   
-  // Stop any active calibration
-  calibrationService.stopCalibration();
+  // Stop inference if active
+  const inferenceService = require('./inferenceService');
+  inferenceService.stopInference();
+  
+  state.phase = 'idle';
+  state.deviceId = null;
+  state.micConfirmed = false;
   
   broadcastPhase('idle');
   broadcastStatus();
@@ -192,15 +100,9 @@ export function resetSession() {
 export function getStatus() {
   return {
     phase: state.phase,
-    expectedDevices: state.expectedDevices,
+    deviceId: state.deviceId,
     connectedDevices: socketServer.getConnectedDevices(),
-    micConfirmed: Array.from(state.micConfirmed),
-    keypressCount: Object.fromEntries(
-      Array.from(state.keypresses.entries()).map(([id, presses]) => [id, presses.length])
-    ),
-    currentKey: state.calibrationKeys[state.currentKeyIndex],
-    keyIndex: state.currentKeyIndex,
-    totalKeys: state.calibrationKeys.length
+    micConfirmed: state.micConfirmed
   };
 }
 

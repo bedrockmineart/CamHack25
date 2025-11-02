@@ -2,19 +2,15 @@
 
 import React, { useEffect, useState, useRef, use } from 'react';
 import { useSocket } from '../../../hooks/useSocket';
-import CalibrationInstructions from '../../../components/CalibrationInstructions';
+import SingleDeviceWarning from '../../../components/SingleDeviceWarning';
 
 export default function PhonePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { socket, emit, connected } = useSocket();
-  const [status, setStatus] = useState<'idle' | 'syncing' | 'recording' | 'error'>('idle');
-  const [offsetNs, setOffsetNs] = useState<bigint | null>(null);
-  const [chunksSent, setChunksSent] = useState(0);
+  const [status, setStatus] = useState<'idle' | 'recording' | 'error'>('idle');
+  const [message, setMessage] = useState('Waiting to connect');
+  const [showPlacementWarning, setShowPlacementWarning] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [message, setMessage] = useState('Waiting to join');
-  const [calibrationKey, setCalibrationKey] = useState<string>('');
-  const [keyIndex, setKeyIndex] = useState<number>(0);
-  const [totalKeys, setTotalKeys] = useState<number>(5);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
@@ -22,9 +18,8 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
   const registeredRef = useRef(false);
   const chunkSeqRef = useRef(0);
 
-  // Do not auto-register — require explicit join from user (Join button)
+  // Listen for phase updates
   useEffect(() => {
-    // Listen for phase updates and short prompts
     if (!socket) return;
 
     const onPhase = (payload: any) => {
@@ -32,110 +27,60 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       setMessage(String(p));
     };
 
-    const onPromptPlaceClose = () => setMessage('Place phones close');
-    
     const onStartMic = async () => {
-      setMessage('Starting microphone');
-      // Actually start recording when server tells us to
+      setMessage('Starting microphone...');
       if (status === 'idle') {
         console.log(`[Phone ${id}] Received start-mic, starting recording...`);
         await startRecording();
-        // Notify server that mic permission was granted
         emit('mic-permission', { granted: true });
       }
     };
     
-    const onPlayTone = () => {
-      setMessage('Playing calibration tone');
-      // TODO: Play calibration tone audio
+    const onShowPlacement = (payload: any) => {
+      setMessage(payload.message || 'Place phone on keyboard');
+      setShowPlacementWarning(true);
     };
     
-    const onPromptPlaceOnKeyboard = () => setMessage('Place on keyboard');
+    const onStartOperation = () => {
+      setMessage('Listening for keystrokes...');
+    };
     
-    const onCalibrateKey = (payload: any) => {
-      setCalibrationKey(payload.key);
-      setKeyIndex(payload.keyIndex);
-      setTotalKeys(payload.totalKeys);
-      setMessage(`Press key: ${payload.key}`);
+    const onInferenceResult = (payload: any) => {
+      console.log('[INFERENCE] Detected keys:', payload.predictions);
+      if (payload.predictions && payload.predictions.length > 0) {
+        setMessage(`Detected: ${payload.predictions.join(', ')}`);
+      }
     };
 
     socket.on('phase-update', onPhase);
-    socket.on('prompt-place-close', onPromptPlaceClose);
     socket.on('start-mic', onStartMic);
-    socket.on('play-calibration-tone', onPlayTone);
-    socket.on('prompt-place-on-keyboard', onPromptPlaceOnKeyboard);
-    socket.on('calibrate-key', onCalibrateKey);
+    socket.on('show-placement', onShowPlacement);
+    socket.on('start-operation', onStartOperation);
+    socket.on('inference-result', onInferenceResult);
 
     return () => {
       socket.off('phase-update', onPhase);
-      socket.off('prompt-place-close', onPromptPlaceClose);
       socket.off('start-mic', onStartMic);
-      socket.off('play-calibration-tone', onPlayTone);
-      socket.off('prompt-place-on-keyboard', onPromptPlaceOnKeyboard);
-      socket.off('calibrate-key', onCalibrateKey);
+      socket.off('show-placement', onShowPlacement);
+      socket.off('start-operation', onStartOperation);
+      socket.off('inference-result', onInferenceResult);
     };
   }, [socket, status, id, emit]);
 
-  // Auto-register on connect so phone has no buttons
+  // Auto-register on connect
   useEffect(() => {
     if (connected && !registeredRef.current) {
       console.log(`[Phone ${id}] Auto-registering device`);
       emit('register', { deviceId: id });
       registeredRef.current = true;
-      setMessage('Joined');
+      setMessage('Connected - waiting to start');
     }
   }, [connected, emit, id]);
-
-  // Perform clock sync
-  async function performClockSync() {
-    if (!socket) return;
-    setStatus('syncing');
-    
-    // Perform multiple pings to estimate offset
-    const samples: bigint[] = [];
-    for (let i = 0; i < 5; i++) {
-      // Use epoch time for clock sync (performance.timeOrigin + performance.now())
-      const clientSendMs = performance.timeOrigin + performance.now();
-      const clientSendNs = BigInt(Math.floor(clientSendMs * 1_000_000));
-      
-      await new Promise<void>((resolve) => {
-        socket.emit('clock-ping', clientSendNs.toString(), (response: any) => {
-          const clientRecvMs = performance.timeOrigin + performance.now();
-          const clientRecvNs = BigInt(Math.floor(clientRecvMs * 1_000_000));
-          const serverRecvNs = BigInt(response.serverRecvNs);
-          const serverSendNs = BigInt(response.serverSendNs);
-          
-          // Estimate offset: offset = serverTime - clientTime
-          // Use midpoint: offset ≈ ((serverRecv + serverSend)/2) - ((clientSend + clientRecv)/2)
-          const serverMidNs = (serverRecvNs + serverSendNs) / BigInt(2);
-          const clientMidNs = (clientSendNs + clientRecvNs) / BigInt(2);
-          const offset = serverMidNs - clientMidNs;
-          samples.push(offset);
-          resolve();
-        });
-      });
-      
-      // Wait 100ms between pings
-      await new Promise(r => setTimeout(r, 100));
-    }
-    
-    // Use median offset
-    samples.sort((a, b) => Number(a - b));
-    const medianOffset = samples[Math.floor(samples.length / 2)];
-    setOffsetNs(medianOffset);
-    
-    // Send offset to server
-    emit('register-offset', { deviceId: id, offsetNs: medianOffset.toString() });
-    console.log(`[Phone ${id}] Clock sync complete. Offset: ${medianOffset}ns (${Number(medianOffset) / 1e6}ms)`);
-  }
 
   // Start recording
   async function startRecording() {
     try {
       setErrorMsg('');
-      
-      // Perform clock sync first
-      await performClockSync();
       
       // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -163,11 +108,9 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       workletNode.port.onmessage = (event) => {
         const { audioData } = event.data;
         
-        // Use current time when we receive the chunk, not the AudioContext time
-        // performance.now() gives ms since page load, performance.timeOrigin is epoch ms when page loaded
         const nowMs = performance.now();
         const clientEpochMs = performance.timeOrigin + nowMs;
-        const clientTimestampNs = BigInt(Math.floor(clientEpochMs * 1_000_000)); // Convert ms to ns
+        const clientTimestampNs = BigInt(Math.floor(clientEpochMs * 1_000_000));
         
         // Convert Float32Array to Int16 PCM
         const int16Data = new Int16Array(audioData.length);
@@ -186,11 +129,10 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
         };
         
         emit('audio-chunk', meta, int16Data.buffer);
-        setChunksSent(prev => prev + 1);
       };
       
       source.connect(workletNode);
-      workletNode.connect(audioContext.destination); // Optional: for monitoring
+      workletNode.connect(audioContext.destination);
       
       setStatus('recording');
       console.log(`[Phone ${id}] Recording started`);
@@ -217,13 +159,24 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       streamRef.current = null;
     }
     setStatus('idle');
-    setChunksSent(0);
     chunkSeqRef.current = 0;
     console.log(`[Phone ${id}] Recording stopped`);
   }
 
   return (
     <div style={{ padding: 16, fontFamily: 'system-ui' }}>
+      <SingleDeviceWarning 
+        show={showPlacementWarning} 
+        onConfirm={() => {
+          setShowPlacementWarning(false);
+          const backend = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
+          fetch(backend + '/api/session/start-operation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          }).catch(err => console.error('Error starting operation:', err));
+        }}
+      />
+      
       <h2>Phone {id}</h2>
       
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -239,53 +192,30 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       <div style={{ marginTop: 18, padding: 12, borderRadius: 8, background: '#f7f7f8', minHeight: 48 }}>
         <div style={{ fontSize: 16, fontWeight: 600 }}>{message}</div>
       </div>
-
-      {calibrationKey && (
-        <div style={{ marginTop: 24, textAlign: 'center' }}>
-          <div style={{ fontSize: 14, color: '#666', marginBottom: 12 }}>
-            Key {keyIndex + 1} of {totalKeys}
-          </div>
+      
+      {errorMsg && (
+        <div style={{ marginTop: 12, padding: 12, background: '#fee', borderRadius: 8, color: '#c33' }}>
+          {errorMsg}
+        </div>
+      )}
+      
+      {status === 'recording' && (
+        <div style={{ marginTop: 20, textAlign: 'center' }}>
           <div style={{ 
-            fontSize: 72, 
-            fontWeight: 'bold', 
-            padding: 40, 
-            background: '#e3f2fd',
-            borderRadius: 16,
+            width: 60, 
+            height: 60, 
+            borderRadius: '50%', 
+            background: '#4caf50',
             margin: '0 auto',
-            maxWidth: 200,
-            border: '3px solid #2196f3'
-          }}>
-            {calibrationKey.toUpperCase()}
-          </div>
-          <button
-            onClick={async () => {
-              const backend = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
-              try {
-                const res = await fetch(backend + '/api/session/next-key', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' }
-                });
-                if (!res.ok) {
-                  console.error('Failed to advance key');
-                }
-              } catch (err) {
-                console.error('Error calling next-key:', err);
-              }
-            }}
-            style={{
-              marginTop: 24,
-              padding: '16px 32px',
-              fontSize: 18,
-              fontWeight: 600,
-              background: '#4caf50',
-              color: 'white',
-              border: 'none',
-              borderRadius: 8,
-              cursor: 'pointer'
-            }}
-          >
-            Next Key
-          </button>
+            animation: 'pulse 2s ease-in-out infinite'
+          }}/>
+          <style>{`
+            @keyframes pulse {
+              0%, 100% { opacity: 1; transform: scale(1); }
+              50% { opacity: 0.5; transform: scale(1.1); }
+            }
+          `}</style>
+          <p style={{ marginTop: 12, color: '#666' }}>Recording...</p>
         </div>
       )}
     </div>
