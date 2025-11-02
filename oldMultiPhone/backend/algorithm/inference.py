@@ -42,66 +42,24 @@ def segment_fixed(y, sr, fixed_len=FIXED_LEN):
         segments.append(segment)
     return segments
 
-def extract_logmel(y, sr):
-    mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP)
+# ---- Real-time preprocessing ----
+def preprocess_single_segment(segment, sr=SR, max_T=MAX_T):
+    """Convert a fixed-length audio segment to normalized log-Mel tensor."""
+    mel = librosa.feature.melspectrogram(
+        y=segment, sr=sr, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP
+    )
     logmel = librosa.power_to_db(mel, ref=np.max)
-    return logmel
 
-def pad_logmel(logmel, max_T=MAX_T):
+    # Pad or truncate to consistent width
     if logmel.shape[1] < max_T:
-        logmel = np.pad(logmel, ((0,0),(0,max_T - logmel.shape[1])))
+        logmel = np.pad(logmel, ((0,0), (0, max_T - logmel.shape[1])))
     elif logmel.shape[1] > max_T:
         logmel = logmel[:, :max_T]
-    return logmel
 
-def preprocess_audio_for_inference(audio_path, sr=SR, fixed_len=FIXED_LEN, max_T=MAX_T):
-    """
-    Loads a raw test audio file, segments it into keystrokes,
-    extracts log-Mel features, and returns a tensor dataset for inference.
-    """
-    y, sr = librosa.load(audio_path, sr=sr)
-    segments = segment_fixed(y, sr)
+    # Convert to tensor with channel dim
+    X = torch.tensor(logmel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,n_mels,max_T)
+    return X
 
-    logmels = []
-    for seg in segments:
-        logmel = extract_logmel(seg, sr)
-        logmel = pad_logmel(logmel, max_T)
-        logmels.append(logmel)
-
-    X = np.stack(logmels)
-    X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(1)  # (N,1,64,max_T)
-    return X_tensor
-
-# ========================
-# DATA PREPARATION
-# ========================
-
-X, y = [], []
-
-for dataset_dir in DATASETS:
-    full_path = os.path.join(ROOT_DIR, dataset_dir)
-    if not os.path.exists(full_path):
-        print(f"⚠️ Skipping missing folder: {full_path}")
-        continue
-
-    print(f"📂 Processing dataset: {dataset_dir}")
-    for file in tqdm(os.listdir(full_path)):
-        if not file.lower().endswith(('.wav', '.m4a', '.mp3')):
-            continue
-        label = os.path.splitext(file)[0]
-        path = os.path.join(full_path, file)
-        audio, sr = librosa.load(path, sr=SR)
-        segments = segment_fixed(audio, sr)
-        for seg in segments:
-            logmel = extract_logmel(seg, sr)
-            logmel = pad_logmel(logmel, MAX_T)
-            X.append(logmel)
-            y.append(label)
-
-X = np.stack(X)
-y = np.array(y)
-np.savez("features.npz", X=X, y=y)
-print("✅ Saved features.npz:", X.shape, y.shape)
 
 class KeyDataset(Dataset):
     def __init__(self, npz_file, mean=None, std=None):
@@ -129,7 +87,7 @@ class KeyDataset(Dataset):
         y = self.y[i]
         return X, y
 
-  # ========================
+# ========================
 # MODEL
 # ========================
 
@@ -180,14 +138,14 @@ class KeyCNN(nn.Module):
 
 model_path = 'https://github.com/bedrockmineart/CamHack25/blob/main/CamHack25Model%20(1).pth'
 
-model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)  # adjust num_classes and dropout if needed
-checkpoint = torch.load(model_path, weights_only=False)
+model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)
+
+checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
+
 model.load_state_dict(checkpoint["model_state"])
 
-import torch
-import numpy as np
 
-def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None, device=None):
+def run_model(segment, model=None, norm=True, mean=None, std=None, label_encoder=None, device=None):
     """
     Predict the label of a single fixed-length audio segment.
 
@@ -201,6 +159,12 @@ def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    if model is None:
+        model_path = 'https://github.com/bedrockmineart/CamHack25/blob/main/CamHack25Model%20(1).pth'
+        model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)
+        checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
+        model.load_state_dict(checkpoint["model_state"])
+        
     # --- default label encoder ---
     if label_encoder is None:
         label_encoder = np.array([
@@ -270,3 +234,4 @@ def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None
         label = label_encoder.inverse_transform([pred_idx])[0]
 
     return label
+
