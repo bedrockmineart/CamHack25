@@ -1,4 +1,4 @@
-import os, glob
+import os, glob, sys
 import numpy as np
 import librosa
 import torch
@@ -12,12 +12,16 @@ from scipy.signal import find_peaks
 # ========================
 # PARAMETERS
 # ========================
-SR = 22050*2
+SR = 22050  # Reduced sample rate from 44100 for better performance
 FIXED_LEN = 0.30    # seconds per keystroke
 N_MELS = 80 # 64
 N_FFT = 1024
 HOP = 256
 MAX_T = 31          # fixed width for spectrograms after padding/truncation
+
+# Check for GPU availability
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"[INFERENCE] Using device: {DEVICE}", file=sys.stderr)
 
 # ========================
 # FUNCTIONS
@@ -26,13 +30,23 @@ MAX_T = 31          # fixed width for spectrograms after padding/truncation
 def segment_fixed(y, sr, fixed_len=FIXED_LEN):
     fixed_samples = int(fixed_len * sr)
     energy = np.square(y)
-    peaks, _ = find_peaks(
+    mean_energy = np.mean(energy)
+    std_energy = np.std(energy)
+    threshold = mean_energy + 0.5 * std_energy
+    
+    print(f"[DEBUG] Segmentation: fixed_len={fixed_len}s, fixed_samples={fixed_samples}", file=sys.stderr)
+    print(f"[DEBUG] Energy: mean={mean_energy:.6f}, std={std_energy:.6f}, threshold={threshold:.6f}", file=sys.stderr)
+    
+    peaks, properties = find_peaks(
         energy,
-        height=np.mean(energy)+0.5*np.std(energy),
+        height=threshold,
         distance=int(0.8*fixed_samples)
     )
+    
+    print(f"[DEBUG] Found {len(peaks)} peaks in audio", file=sys.stderr)
+    
     segments = []
-    for start in peaks[:-1]:  # ignore last partial keystroke
+    for idx, start in enumerate(peaks[:-1]):  # ignore last partial keystroke
         end = start + fixed_samples
         if end > len(y):
             segment = np.zeros(fixed_samples)
@@ -40,68 +54,28 @@ def segment_fixed(y, sr, fixed_len=FIXED_LEN):
         else:
             segment = y[start:end]
         segments.append(segment)
+        print(f"[DEBUG] Segment {idx+1}: start={start/sr:.3f}s, end={end/sr:.3f}s", file=sys.stderr)
+    
     return segments
 
-def extract_logmel(y, sr):
-    mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP)
+# ---- Real-time preprocessing ----
+def preprocess_single_segment(segment, sr=SR, max_T=MAX_T):
+    """Convert a fixed-length audio segment to normalized log-Mel tensor."""
+    mel = librosa.feature.melspectrogram(
+        y=segment, sr=sr, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP
+    )
     logmel = librosa.power_to_db(mel, ref=np.max)
-    return logmel
 
-def pad_logmel(logmel, max_T=MAX_T):
+    # Pad or truncate to consistent width
     if logmel.shape[1] < max_T:
-        logmel = np.pad(logmel, ((0,0),(0,max_T - logmel.shape[1])))
+        logmel = np.pad(logmel, ((0,0), (0, max_T - logmel.shape[1])))
     elif logmel.shape[1] > max_T:
         logmel = logmel[:, :max_T]
-    return logmel
 
-def preprocess_audio_for_inference(audio_path, sr=SR, fixed_len=FIXED_LEN, max_T=MAX_T):
-    """
-    Loads a raw test audio file, segments it into keystrokes,
-    extracts log-Mel features, and returns a tensor dataset for inference.
-    """
-    y, sr = librosa.load(audio_path, sr=sr)
-    segments = segment_fixed(y, sr)
+    # Convert to tensor with channel dim
+    X = torch.tensor(logmel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,n_mels,max_T)
+    return X
 
-    logmels = []
-    for seg in segments:
-        logmel = extract_logmel(seg, sr)
-        logmel = pad_logmel(logmel, max_T)
-        logmels.append(logmel)
-
-    X = np.stack(logmels)
-    X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(1)  # (N,1,64,max_T)
-    return X_tensor
-
-# ========================
-# DATA PREPARATION
-# ========================
-
-X, y = [], []
-
-for dataset_dir in DATASETS:
-    full_path = os.path.join(ROOT_DIR, dataset_dir)
-    if not os.path.exists(full_path):
-        print(f"⚠️ Skipping missing folder: {full_path}")
-        continue
-
-    print(f"📂 Processing dataset: {dataset_dir}")
-    for file in tqdm(os.listdir(full_path)):
-        if not file.lower().endswith(('.wav', '.m4a', '.mp3')):
-            continue
-        label = os.path.splitext(file)[0]
-        path = os.path.join(full_path, file)
-        audio, sr = librosa.load(path, sr=SR)
-        segments = segment_fixed(audio, sr)
-        for seg in segments:
-            logmel = extract_logmel(seg, sr)
-            logmel = pad_logmel(logmel, MAX_T)
-            X.append(logmel)
-            y.append(label)
-
-X = np.stack(X)
-y = np.array(y)
-np.savez("features.npz", X=X, y=y)
-print("✅ Saved features.npz:", X.shape, y.shape)
 
 class KeyDataset(Dataset):
     def __init__(self, npz_file, mean=None, std=None):
@@ -129,7 +103,7 @@ class KeyDataset(Dataset):
         y = self.y[i]
         return X, y
 
-  # ========================
+# ========================
 # MODEL
 # ========================
 
@@ -178,16 +152,8 @@ class KeyCNN(nn.Module):
         x = self.classifier(x)
         return x
 
-model_path = 'https://github.com/bedrockmineart/CamHack25/blob/main/CamHack25Model%20(1).pth'
 
-model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)  # adjust num_classes and dropout if needed
-checkpoint = torch.load(model_path, weights_only=False)
-model.load_state_dict(checkpoint["model_state"])
-
-import torch
-import numpy as np
-
-def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None, device=None):
+def run_model(segment, model=None, norm=True, mean=None, std=None, label_encoder=None, device=None):
     """
     Predict the label of a single fixed-length audio segment.
 
@@ -199,8 +165,20 @@ def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None
     """
     # --- device ---
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = DEVICE  # Use global DEVICE (GPU if available)
+    
+    print(f"[DEBUG] run_model: device={device}, segment_shape={segment.shape}", file=sys.stderr)
 
+    if model is None:
+        # Load model from local file
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(script_dir, 'CamHack25Model.pth')
+        print(f"[DEBUG] Loading model from: {model_path}", file=sys.stderr)
+        model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)
+        checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
+        model.load_state_dict(checkpoint["model_state"])
+        print(f"[DEBUG] Model loaded successfully", file=sys.stderr)
+        
     # --- default label encoder ---
     if label_encoder is None:
         label_encoder = np.array([
@@ -251,17 +229,22 @@ def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None
     model.to(device)
 
     # Preprocess
+    print(f"[DEBUG] Preprocessing segment...", file=sys.stderr)
     X = preprocess_single_segment(segment)  # must return a torch tensor [1, n_mels, T]
+    print(f"[DEBUG] Preprocessed shape: {X.shape}", file=sys.stderr)
     X = X.to(device)
 
     if norm:
         mean_t = torch.tensor(mean, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(-1)
         std_t = torch.tensor(std, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(-1)
         X = (X - mean_t) / std_t
+        print(f"[DEBUG] Applied normalization", file=sys.stderr)
 
     with torch.no_grad():
         pred = model(X)
         pred_idx = pred.argmax(1).item()
+        confidence = torch.softmax(pred, dim=1)[0, pred_idx].item()
+        print(f"[DEBUG] Prediction index: {pred_idx}, confidence: {confidence:.4f}", file=sys.stderr)
 
     # If label_encoder is np.ndarray, get label directly
     if isinstance(label_encoder, np.ndarray):
@@ -269,4 +252,5 @@ def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None
     else:
         label = label_encoder.inverse_transform([pred_idx])[0]
 
+    print(f"[DEBUG] Predicted label: {label}", file=sys.stderr)
     return label

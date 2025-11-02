@@ -21,14 +21,15 @@ let inferenceActive = false;
 let audioBuffer: AudioBuffer = {
   samples: [],
   timestamps: [],
-  sampleRate: 48000,
+  sampleRate: 22050, // Reduced from 48000 to 22050 (matches model SR)
   totalSamples: 0
 };
 
-const BUFFER_DURATION_MS = 5000; // Keep 5 seconds of audio
-const INFERENCE_INTERVAL_MS = 1000; // Run inference every 1 second
+const BUFFER_DURATION_MS = 4000; // Keep 4 seconds of audio (reduced from 5)
+const INFERENCE_INTERVAL_MS = 2000; // Run inference every 2 seconds (reduced from 1)
 
 let inferenceTimer: NodeJS.Timeout | null = null;
+let isInferenceRunning = false; // Prevent overlapping inference runs
 
 /**
  * Start single-device inference mode
@@ -43,15 +44,19 @@ export function startInference(deviceId: string) {
   audioBuffer = {
     samples: [],
     timestamps: [],
-    sampleRate: 48000,
+    sampleRate: 22050,
     totalSamples: 0
   };
 
-  console.log(`[INFERENCE] Started for device ${deviceId}`);
+  console.log(`[INFERENCE] Started for device ${deviceId} (22050Hz, ${INFERENCE_INTERVAL_MS}ms interval)`);
   
   // Start periodic inference
   inferenceTimer = setInterval(() => {
-    runInference(deviceId);
+    if (!isInferenceRunning) {
+      runInference(deviceId);
+    } else {
+      console.log('[INFERENCE] Skipping - previous run still processing');
+    }
   }, INFERENCE_INTERVAL_MS);
 
   // Notify clients
@@ -74,9 +79,11 @@ export function stopInference() {
   audioBuffer = {
     samples: [],
     timestamps: [],
-    sampleRate: 48000,
+    sampleRate: 22050,
     totalSamples: 0
   };
+  
+  isInferenceRunning = false;
 
   console.log('[INFERENCE] Stopped');
   socketServer.emitToAll('inference-stopped', {});
@@ -91,17 +98,36 @@ export function isInferenceActive(): boolean {
 
 /**
  * Add audio chunk to buffer for inference
+ * Downsamples from incoming rate (48kHz) to target rate (22050Hz)
  */
 export function addAudioChunk(samples: Float32Array, timestamp: bigint, sampleRate: number) {
   if (!inferenceActive) return;
 
-  audioBuffer.samples.push(new Float32Array(samples));
+  // Downsample if necessary
+  const targetRate = 22050;
+  let processedSamples: Float32Array;
+  
+  if (sampleRate !== targetRate) {
+    const ratio = sampleRate / targetRate;
+    const newLength = Math.floor(samples.length / ratio);
+    processedSamples = new Float32Array(newLength);
+    
+    // Simple linear downsampling
+    for (let i = 0; i < newLength; i++) {
+      const srcIndex = Math.floor(i * ratio);
+      processedSamples[i] = samples[srcIndex];
+    }
+  } else {
+    processedSamples = new Float32Array(samples);
+  }
+
+  audioBuffer.samples.push(processedSamples);
   audioBuffer.timestamps.push(timestamp);
-  audioBuffer.sampleRate = sampleRate;
-  audioBuffer.totalSamples += samples.length;
+  audioBuffer.sampleRate = targetRate;
+  audioBuffer.totalSamples += processedSamples.length;
 
   // Maintain buffer size (remove old samples)
-  const maxSamples = Math.floor((BUFFER_DURATION_MS / 1000) * sampleRate);
+  const maxSamples = Math.floor((BUFFER_DURATION_MS / 1000) * targetRate);
   while (audioBuffer.totalSamples > maxSamples && audioBuffer.samples.length > 0) {
     const removed = audioBuffer.samples.shift();
     audioBuffer.timestamps.shift();
@@ -115,9 +141,12 @@ export function addAudioChunk(samples: Float32Array, timestamp: bigint, sampleRa
  * Run inference on buffered audio
  */
 async function runInference(deviceId: string) {
-  if (!inferenceActive || audioBuffer.samples.length === 0) {
+  if (!inferenceActive || audioBuffer.samples.length === 0 || isInferenceRunning) {
     return;
   }
+
+  isInferenceRunning = true;
+  const startTime = Date.now();
 
   try {
     // Concatenate audio buffer
@@ -137,6 +166,9 @@ async function runInference(deviceId: string) {
     // Run Python inference script
     const predictions = await runPythonInference(tempFile);
 
+    const duration = Date.now() - startTime;
+    console.log(`[INFERENCE] Completed in ${duration}ms`);
+
     if (predictions && predictions.length > 0) {
       console.log(`[INFERENCE] Detected ${predictions.length} keystrokes:`, predictions);
       
@@ -153,6 +185,8 @@ async function runInference(deviceId: string) {
 
   } catch (error) {
     console.error('[INFERENCE] Error during inference:', error);
+  } finally {
+    isInferenceRunning = false;
   }
 }
 

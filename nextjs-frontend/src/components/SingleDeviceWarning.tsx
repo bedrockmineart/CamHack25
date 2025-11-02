@@ -22,14 +22,18 @@ export default function SingleDeviceWarning({ show, onConfirm }: SingleDeviceWar
       alignItems: 'center',
       justifyContent: 'center',
       zIndex: 1000,
-      padding: 20
+      padding: 20,
+      overflowY: 'auto'
     }}>
       <div style={{
         background: 'white',
         borderRadius: 12,
         padding: 32,
         maxWidth: 600,
-        boxShadow: '0 10px 40px rgba(0, 0, 0, 0.3)'
+        maxHeight: '90vh',
+        overflowY: 'auto',
+        boxShadow: '0 10px 40px rgba(0, 0, 0, 0.3)',
+        margin: 'auto'
       }}>
         <div style={{
           display: 'flex',
@@ -99,27 +103,30 @@ export default function SingleDeviceWarning({ show, onConfirm }: SingleDeviceWar
           </p>
         </div>
 
-        {onConfirm && (
-          <button
-            onClick={onConfirm}
-            style={{
-              width: '100%',
-              padding: '14px 24px',
-              fontSize: 16,
-              fontWeight: 600,
-              background: '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: 8,
-              cursor: 'pointer',
-              transition: 'background 0.2s'
-            }}
-            onMouseOver={(e) => e.currentTarget.style.background = '#0056b3'}
-            onMouseOut={(e) => e.currentTarget.style.background = '#007bff'}
-          >
-            I Understand - Continue
-          </button>
-        )}
+        <button
+          onClick={() => {
+            console.log('[SingleDeviceWarning] Continue button clicked');
+            if (onConfirm) {
+              onConfirm();
+            }
+          }}
+          style={{
+            width: '100%',
+            padding: '14px 24px',
+            fontSize: 16,
+            fontWeight: 600,
+            background: '#007bff',
+            color: 'white',
+            border: 'none',
+            borderRadius: 8,
+            cursor: 'pointer',
+            transition: 'background 0.2s'
+          }}
+          onMouseOver={(e) => e.currentTarget.style.background = '#0056b3'}
+          onMouseOut={(e) => e.currentTarget.style.background = '#007bff'}
+        >
+          I Understand - Continue
+        </button>
       </div>
     </div>
   );

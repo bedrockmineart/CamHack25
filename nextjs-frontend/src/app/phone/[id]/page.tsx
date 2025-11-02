@@ -168,12 +168,26 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       <SingleDeviceWarning 
         show={showPlacementWarning} 
         onConfirm={() => {
+          console.log('[Phone] User confirmed placement warning');
           setShowPlacementWarning(false);
+          
           const backend = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
+          console.log('[Phone] Calling start-operation endpoint:', backend + '/api/session/start-operation');
+          
           fetch(backend + '/api/session/start-operation', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
-          }).catch(err => console.error('Error starting operation:', err));
+          })
+            .then(res => {
+              console.log('[Phone] start-operation response status:', res.status);
+              return res.json();
+            })
+            .then(data => {
+              console.log('[Phone] start-operation response:', data);
+            })
+            .catch(err => {
+              console.error('[Phone] Error starting operation:', err);
+            });
         }}
       />
       
