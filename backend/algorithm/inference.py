@@ -9,23 +9,15 @@ import torch.optim as optim
 from tqdm import tqdm
 from scipy.signal import find_peaks
 
-# ========================
-# PARAMETERS
-# ========================
-SR = 22050  # Reduced sample rate from 44100 for better performance
-FIXED_LEN = 0.30    # seconds per keystroke
-N_MELS = 80 # 64
+SR = 22050*2
+FIXED_LEN = 0.30
+N_MELS = 80
 N_FFT = 1024
 HOP = 256
-MAX_T = 31          # fixed width for spectrograms after padding/truncation
+MAX_T = 31
 
-# Check for GPU availability
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"[INFERENCE] Using device: {DEVICE}", file=sys.stderr)
-
-# ========================
-# FUNCTIONS
-# ========================
+print(f"Using device: {DEVICE}", file=sys.stderr)
 
 def segment_fixed(y, sr, fixed_len=FIXED_LEN):
     fixed_samples = int(fixed_len * sr)
@@ -34,19 +26,14 @@ def segment_fixed(y, sr, fixed_len=FIXED_LEN):
     std_energy = np.std(energy)
     threshold = mean_energy + 0.5 * std_energy
     
-    print(f"[DEBUG] Segmentation: fixed_len={fixed_len}s, fixed_samples={fixed_samples}", file=sys.stderr)
-    print(f"[DEBUG] Energy: mean={mean_energy:.6f}, std={std_energy:.6f}, threshold={threshold:.6f}", file=sys.stderr)
+    print(f"Segmentation: {fixed_len}s, {fixed_samples} samples", file=sys.stderr)
+    print(f"Energy threshold: {threshold:.6f}", file=sys.stderr)
     
-    peaks, properties = find_peaks(
-        energy,
-        height=threshold,
-        distance=int(0.8*fixed_samples)
-    )
-    
-    print(f"[DEBUG] Found {len(peaks)} peaks in audio", file=sys.stderr)
+    peaks, _ = find_peaks(energy, height=threshold, distance=int(0.8*fixed_samples))
+    print(f"Found {len(peaks)} peaks", file=sys.stderr)
     
     segments = []
-    for idx, start in enumerate(peaks[:-1]):  # ignore last partial keystroke
+    for idx, start in enumerate(peaks[:-1]):
         end = start + fixed_samples
         if end > len(y):
             segment = np.zeros(fixed_samples)
@@ -54,38 +41,31 @@ def segment_fixed(y, sr, fixed_len=FIXED_LEN):
         else:
             segment = y[start:end]
         segments.append(segment)
-        print(f"[DEBUG] Segment {idx+1}: start={start/sr:.3f}s, end={end/sr:.3f}s", file=sys.stderr)
+        print(f"Segment {idx+1}: {start/sr:.3f}s - {end/sr:.3f}s", file=sys.stderr)
     
     return segments
 
-# ---- Real-time preprocessing ----
 def preprocess_single_segment(segment, sr=SR, max_T=MAX_T):
-    """Convert a fixed-length audio segment to normalized log-Mel tensor."""
     mel = librosa.feature.melspectrogram(
         y=segment, sr=sr, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP
     )
     logmel = librosa.power_to_db(mel, ref=np.max)
 
-    # Pad or truncate to consistent width
     if logmel.shape[1] < max_T:
         logmel = np.pad(logmel, ((0,0), (0, max_T - logmel.shape[1])))
     elif logmel.shape[1] > max_T:
         logmel = logmel[:, :max_T]
 
-    # Convert to tensor with channel dim
-    X = torch.tensor(logmel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,n_mels,max_T)
+    X = torch.tensor(logmel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
     return X
-
 
 class KeyDataset(Dataset):
     def __init__(self, npz_file, mean=None, std=None):
         data = np.load(npz_file, allow_pickle=True)
         X, y = data["X"], data["y"]
-        self.X = torch.tensor(X, dtype=torch.float32).unsqueeze(1)  # (N,1,n_mels,max_T)
+        self.X = torch.tensor(X, dtype=torch.float32).unsqueeze(1)
         self.le = LabelEncoder()
         self.y = torch.tensor(self.le.fit_transform(y), dtype=torch.long)
-
-        # Normalization values
         self.mean = mean
         self.std = std
         self.num_classes = len(self.le.classes_)
@@ -96,42 +76,33 @@ class KeyDataset(Dataset):
     def __getitem__(self, i):
         X = self.X[i]
         if self.mean is not None and self.std is not None:
-            # Apply normalization per feature (Mel band)
             mean_t = torch.tensor(self.mean, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
             std_t = torch.tensor(self.std, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
             X = (X - mean_t) / std_t
         y = self.y[i]
         return X, y
 
-# ========================
-# MODEL
-# ========================
-
 class KeyCNN(nn.Module):
     def __init__(self, num_classes, n_mels, max_T, dropout=0.3):
         super().__init__()
 
         self.features = nn.Sequential(
-            # --- Conv Block 1 ---
             nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.BatchNorm2d(16),
             nn.ReLU(),
             nn.MaxPool2d(2),
 
-            # --- Conv Block 2 ---
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2),
 
-            # --- Conv Block 3 ---
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2)
         )
 
-        # 🧮 Compute flattened feature size dynamically
         with torch.no_grad():
             dummy = torch.zeros(1, 1, n_mels, max_T)
             feat_dim = self.features(dummy).numel()
@@ -154,32 +125,20 @@ class KeyCNN(nn.Module):
 
 
 def run_model(segment, model=None, norm=True, mean=None, std=None, label_encoder=None, device=None):
-    """
-    Predict the label of a single fixed-length audio segment.
-
-    Args:
-        segment: numpy array of shape (samples,)
-        model: trained PyTorch model
-        mean, std: normalization arrays from training (shape [n_mels])
-        label_encoder: sklearn LabelEncoder or list/array of class labels
-    """
-    # --- device ---
     if device is None:
-        device = DEVICE  # Use global DEVICE (GPU if available)
+        device = DEVICE
     
-    print(f"[DEBUG] run_model: device={device}, segment_shape={segment.shape}", file=sys.stderr)
+    print(f"run_model: device={device}, shape={segment.shape}", file=sys.stderr)
 
     if model is None:
-        # Load model from local file
         script_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(script_dir, 'CamHack25Model.pth')
-        print(f"[DEBUG] Loading model from: {model_path}", file=sys.stderr)
+        print(f"Loading model from {model_path}", file=sys.stderr)
         model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)
         checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
         model.load_state_dict(checkpoint["model_state"])
-        print(f"[DEBUG] Model loaded successfully", file=sys.stderr)
+        print("Model loaded", file=sys.stderr)
         
-    # --- default label encoder ---
     if label_encoder is None:
         label_encoder = np.array([
             'a', 'b', 'back', 'c', 'caps', 'd', 'e', 'enter', 'f', 'g', 'h',
@@ -187,7 +146,6 @@ def run_model(segment, model=None, norm=True, mean=None, std=None, label_encoder
             't', 'u', 'v', 'w', 'x', 'y', 'z'
         ])
 
-    # --- default mean/std ---
     if mean is None:
         mean = np.array([
             -18.690125, -17.937227, -20.178814, -21.39577,  -22.90489,  -25.344667,
@@ -224,33 +182,30 @@ def run_model(segment, model=None, norm=True, mean=None, std=None, label_encoder
             10.717187,  10.690204
         ])
 
-    # --- inference ---
     model.eval()
     model.to(device)
 
-    # Preprocess
-    print(f"[DEBUG] Preprocessing segment...", file=sys.stderr)
-    X = preprocess_single_segment(segment)  # must return a torch tensor [1, n_mels, T]
-    print(f"[DEBUG] Preprocessed shape: {X.shape}", file=sys.stderr)
+    print("Preprocessing segment", file=sys.stderr)
+    X = preprocess_single_segment(segment)
+    print(f"Preprocessed shape: {X.shape}", file=sys.stderr)
     X = X.to(device)
 
     if norm:
         mean_t = torch.tensor(mean, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(-1)
         std_t = torch.tensor(std, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(-1)
         X = (X - mean_t) / std_t
-        print(f"[DEBUG] Applied normalization", file=sys.stderr)
+        print("Applied normalization", file=sys.stderr)
 
     with torch.no_grad():
         pred = model(X)
         pred_idx = pred.argmax(1).item()
         confidence = torch.softmax(pred, dim=1)[0, pred_idx].item()
-        print(f"[DEBUG] Prediction index: {pred_idx}, confidence: {confidence:.4f}", file=sys.stderr)
+        print(f"Prediction: idx={pred_idx}, confidence={confidence:.4f}", file=sys.stderr)
 
-    # If label_encoder is np.ndarray, get label directly
     if isinstance(label_encoder, np.ndarray):
         label = label_encoder[pred_idx]
     else:
         label = label_encoder.inverse_transform([pred_idx])[0]
 
-    print(f"[DEBUG] Predicted label: {label}", file=sys.stderr)
+    print(f"Predicted: {label}", file=sys.stderr)
     return label

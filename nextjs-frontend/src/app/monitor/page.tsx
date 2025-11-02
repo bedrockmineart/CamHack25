@@ -9,6 +9,7 @@ export default function MonitorPage() {
   const [sessionStatus, setSessionStatus] = useState<any>(null);
   const [inferenceResults, setInferenceResults] = useState<Array<{ keys: string[]; timestamp: number }>>([]);
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [debugMode, setDebugMode] = useState<boolean>(false);
 
   useEffect(() => {
     if (!socket) return;
@@ -48,12 +49,13 @@ export default function MonitorPage() {
     };
   }, [socket]);
 
-  const postEndpoint = async (path: string) => {
+  const postEndpoint = async (path: string, body?: any) => {
     const backend = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
     try {
       const res = await fetch(backend + path, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined
       });
       if (!res.ok) {
         console.error(`Failed to POST ${path}`);
@@ -61,6 +63,10 @@ export default function MonitorPage() {
     } catch (err) {
       console.error(`Error calling ${path}:`, err);
     }
+  };
+
+  const handleStartSession = () => {
+    postEndpoint('/api/session/start', { debugMode });
   };
 
   return (
@@ -84,16 +90,33 @@ export default function MonitorPage() {
           <div style={{ fontWeight: 600 }}>{phase}</div>
         </div>
 
-        <div style={{ marginLeft: 'auto' }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
           {phase === 'idle' && (
-            <button onClick={() => postEndpoint('/api/session/start')} disabled={!connected}>
-              Start Session
-            </button>
+            <>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                <input 
+                  type="checkbox" 
+                  checked={debugMode} 
+                  onChange={(e) => setDebugMode(e.target.checked)}
+                />
+                <span style={{ fontSize: 14 }}>Debug Mode</span>
+              </label>
+              <button onClick={handleStartSession} disabled={!connected}>
+                Start Session
+              </button>
+            </>
           )}
           {phase !== 'idle' && (
-            <button onClick={() => postEndpoint('/api/session/reset')} disabled={!connected}>
-              Stop Session
-            </button>
+            <>
+              {sessionStatus?.debugMode && (
+                <span style={{ fontSize: 12, color: '#ff6b00', fontWeight: 600, marginRight: 8 }}>
+                  🔧 DEBUG MODE
+                </span>
+              )}
+              <button onClick={() => postEndpoint('/api/session/reset')} disabled={!connected}>
+                Stop Session
+              </button>
+            </>
           )}
         </div>
       </div>

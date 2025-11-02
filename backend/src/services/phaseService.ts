@@ -1,23 +1,22 @@
 import * as socketServer from './socketServer';
 
-export type Phase = 
-  | 'idle'
-  | 'placement'
-  | 'operation';
+export type Phase = 'idle' | 'placement' | 'operation';
 
 interface SessionState {
   phase: Phase;
   deviceId: string | null;
   micConfirmed: boolean;
+  debugMode: boolean;
 }
 
 let state: SessionState = {
   phase: 'idle',
   deviceId: null,
-  micConfirmed: false
+  micConfirmed: false,
+  debugMode: false
 };
 
-export function startSession() {
+export function startSession(debugMode: boolean = true) {
   const connectedDevices = socketServer.getConnectedDevices();
   
   if (connectedDevices.length === 0) {
@@ -26,27 +25,28 @@ export function startSession() {
   }
   
   if (connectedDevices.length > 1) {
-    console.warn('[PHASE] Multiple devices detected. This system only supports single device.');
+    console.warn('[PHASE] Multiple devices - only single device supported');
     return { success: false, error: 'Only single device supported', phase: state.phase };
   }
   
   state.deviceId = connectedDevices[0];
   state.phase = 'placement';
   state.micConfirmed = false;
+  state.debugMode = debugMode;
   
-  console.log(`[PHASE] Starting session with device ${state.deviceId}`);
+  console.log(`[PHASE] Starting session ${state.deviceId}${debugMode ? ' (DEBUG)' : ''}`);
   
-  // Tell device to start microphone
   socketServer.emitToAll('start-mic', {});
   
-  // Show placement instructions
   broadcastPhase('placement');
   socketServer.emitToAll('show-placement', {
-    message: 'Place your phone in the center of the keyboard, with the microphone facing the keys.'
+    message: debugMode 
+      ? 'DEBUG MODE: Recording session. Place phone and start. Stop to process.'
+      : 'Place phone in center of keyboard, microphone facing keys.'
   });
   
   broadcastStatus();
-  return { success: true, phase: state.phase };
+  return { success: true, phase: state.phase, debugMode };
 }
 
 export function markMicConfirmed(deviceId: string) {
@@ -70,31 +70,38 @@ export function startOperation() {
   broadcastPhase('operation');
   socketServer.emitToAll('start-operation', {});
   
-  // Start inference service
   const inferenceService = require('./inferenceService');
   if (state.deviceId) {
-    inferenceService.startInference(state.deviceId);
+    inferenceService.startInference(state.deviceId, state.debugMode);
   }
   
   broadcastStatus();
-  console.log('[PHASE] Operation started');
-  return { success: true, phase: state.phase, message: 'System is now listening for keystrokes.' };
+  console.log(`[PHASE] Operation started${state.debugMode ? ' (DEBUG)' : ''}`);
+  return { 
+    success: true, 
+    phase: state.phase, 
+    message: state.debugMode 
+      ? 'Recording session - stop to process.' 
+      : 'Listening for keystrokes.' 
+  };
 }
 
 export function resetSession() {
-  console.log('[PHASE] Resetting session to idle');
+  console.log('[PHASE] Resetting to idle');
   
-  // Stop inference if active
   const inferenceService = require('./inferenceService');
-  inferenceService.stopInference();
+  if (state.deviceId) {
+    inferenceService.stopInference(state.deviceId);
+  }
   
   state.phase = 'idle';
   state.deviceId = null;
   state.micConfirmed = false;
+  state.debugMode = false;
   
   broadcastPhase('idle');
   broadcastStatus();
-  return { success: true, phase: state.phase, message: 'Session reset to idle.' };
+  return { success: true, phase: state.phase, message: 'Session reset.' };
 }
 
 export function getStatus() {
@@ -102,7 +109,8 @@ export function getStatus() {
     phase: state.phase,
     deviceId: state.deviceId,
     connectedDevices: socketServer.getConnectedDevices(),
-    micConfirmed: state.micConfirmed
+    micConfirmed: state.micConfirmed,
+    debugMode: state.debugMode
   };
 }
 

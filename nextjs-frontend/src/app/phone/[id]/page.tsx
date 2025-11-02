@@ -11,6 +11,7 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
   const [message, setMessage] = useState('Waiting to connect');
   const [showPlacementWarning, setShowPlacementWarning] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [uploading, setUploading] = useState(false);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
@@ -18,7 +19,6 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
   const registeredRef = useRef(false);
   const chunkSeqRef = useRef(0);
 
-  // Listen for phase updates
   useEffect(() => {
     if (!socket) return;
 
@@ -30,7 +30,7 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
     const onStartMic = async () => {
       setMessage('Starting microphone...');
       if (status === 'idle') {
-        console.log(`[Phone ${id}] Received start-mic, starting recording...`);
+        console.log(`Phone ${id} starting recording`);
         await startRecording();
         emit('mic-permission', { granted: true });
       }
@@ -46,7 +46,7 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
     };
     
     const onInferenceResult = (payload: any) => {
-      console.log('[INFERENCE] Detected keys:', payload.predictions);
+      console.log('Detected keys:', payload.predictions);
       if (payload.predictions && payload.predictions.length > 0) {
         setMessage(`Detected: ${payload.predictions.join(', ')}`);
       }
@@ -67,22 +67,19 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
     };
   }, [socket, status, id, emit]);
 
-  // Auto-register on connect
   useEffect(() => {
     if (connected && !registeredRef.current) {
-      console.log(`[Phone ${id}] Auto-registering device`);
+      console.log(`Phone ${id} registering`);
       emit('register', { deviceId: id });
       registeredRef.current = true;
       setMessage('Connected - waiting to start');
     }
   }, [connected, emit, id]);
 
-  // Start recording
   async function startRecording() {
     try {
       setErrorMsg('');
       
-      // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: false,
@@ -93,18 +90,15 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       });
       streamRef.current = stream;
       
-      // Create AudioContext
       const audioContext = new AudioContext({ sampleRate: 48000 });
       audioContextRef.current = audioContext;
       
-      // Load audio worklet for precise capture
       await audioContext.audioWorklet.addModule('/audio-processor.js');
       
       const source = audioContext.createMediaStreamSource(stream);
       const workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
       workletNodeRef.current = workletNode;
       
-      // Handle audio chunks from worklet
       workletNode.port.onmessage = (event) => {
         const { audioData } = event.data;
         
@@ -112,13 +106,11 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
         const clientEpochMs = performance.timeOrigin + nowMs;
         const clientTimestampNs = BigInt(Math.floor(clientEpochMs * 1_000_000));
         
-        // Convert Float32Array to Int16 PCM
         const int16Data = new Int16Array(audioData.length);
         for (let i = 0; i < audioData.length; i++) {
           int16Data[i] = Math.max(-32768, Math.min(32767, Math.floor(audioData[i] * 32768)));
         }
         
-        // Send to server
         const meta = {
           deviceId: id,
           seq: chunkSeqRef.current++,
@@ -135,16 +127,15 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       workletNode.connect(audioContext.destination);
       
       setStatus('recording');
-      console.log(`[Phone ${id}] Recording started`);
+      console.log(`Phone ${id} recording started`);
       
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to start recording');
       setStatus('error');
-      console.error(`[Phone ${id}] Error:`, err);
+      console.error(`Phone ${id} error:`, err);
     }
   }
 
-  // Stop recording
   function stopRecording() {
     if (workletNodeRef.current) {
       workletNodeRef.current.disconnect();
@@ -160,7 +151,49 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
     }
     setStatus('idle');
     chunkSeqRef.current = 0;
-    console.log(`[Phone ${id}] Recording stopped`);
+    console.log(`Phone ${id} stopped`);
+  }
+
+  async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setErrorMsg('');
+    setMessage(`Uploading ${file.name}...`);
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', file);
+      formData.append('deviceId', id);
+
+      const backend = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
+      const response = await fetch(`${backend}/api/audio/upload`, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      console.log('Upload result:', result);
+
+      if (result.predictions && result.predictions.length > 0) {
+        setMessage(`Detected: ${result.predictions.join(', ')}`);
+      } else {
+        setMessage('Upload complete - no keystrokes detected');
+      }
+
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Upload failed');
+      setMessage('Upload failed');
+      console.error('Upload error:', err);
+    } finally {
+      setUploading(false);
+      event.target.value = '';
+    }
   }
 
   return (
@@ -168,26 +201,22 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
       <SingleDeviceWarning 
         show={showPlacementWarning} 
         onConfirm={() => {
-          console.log('[Phone] User confirmed placement warning');
+          console.log('User confirmed placement');
           setShowPlacementWarning(false);
           
           const backend = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
-          console.log('[Phone] Calling start-operation endpoint:', backend + '/api/session/start-operation');
+          console.log('Starting operation');
           
           fetch(backend + '/api/session/start-operation', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
           })
             .then(res => {
-              console.log('[Phone] start-operation response status:', res.status);
+              console.log('Operation started:', res.status);
               return res.json();
             })
-            .then(data => {
-              console.log('[Phone] start-operation response:', data);
-            })
-            .catch(err => {
-              console.error('[Phone] Error starting operation:', err);
-            });
+            .then(data => console.log(data))
+            .catch(err => console.error('Error starting operation:', err));
         }}
       />
       
@@ -232,6 +261,44 @@ export default function PhonePage({ params }: { params: Promise<{ id: string }> 
           <p style={{ marginTop: 12, color: '#666' }}>Recording...</p>
         </div>
       )}
+
+      <div style={{ 
+        marginTop: 30, 
+        padding: 20, 
+        border: '2px dashed #ccc', 
+        borderRadius: 12, 
+        textAlign: 'center',
+        background: '#fafafa'
+      }}>
+        <h3 style={{ marginTop: 0, marginBottom: 12, fontSize: 16 }}>
+          Upload Voice Memo
+        </h3>
+        <p style={{ fontSize: 14, color: '#666', marginBottom: 16 }}>
+          Select a voice memo file (M4A, WAV, MP3) to analyze
+        </p>
+        <label style={{ 
+          display: 'inline-block',
+          padding: '12px 24px',
+          background: uploading ? '#ccc' : '#2196F3',
+          color: 'white',
+          borderRadius: 8,
+          cursor: uploading ? 'not-allowed' : 'pointer',
+          fontSize: 16,
+          fontWeight: 600
+        }}>
+          {uploading ? 'Uploading...' : 'Choose File'}
+          <input 
+            type="file" 
+            accept="audio/*,.m4a"
+            onChange={handleFileUpload}
+            disabled={uploading}
+            style={{ display: 'none' }}
+          />
+        </label>
+        <p style={{ fontSize: 12, color: '#999', marginTop: 12 }}>
+          Supported: M4A, WAV, MP3, and other audio formats
+        </p>
+      </div>
     </div>
   );
 }

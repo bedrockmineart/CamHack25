@@ -59,8 +59,9 @@ app.get('/api/status', (_req, res) => {
 });
 
 // Session control endpoints
-app.post('/api/session/start', (_req, res) => {
-    const result = phaseService.startSession();
+app.post('/api/session/start', (req, res) => {
+    const debugMode = req.body?.debugMode === true;
+    const result = phaseService.startSession(debugMode);
     res.json(result);
 });
 

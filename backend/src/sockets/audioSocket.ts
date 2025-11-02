@@ -4,13 +4,10 @@ import { nowNs } from '../utils/time';
 import type { AudioChunkMeta } from '../types';
 import { registerDevice, unregisterDevice } from '../services/socketServer';
 
-/**
- * Simplified audio socket handlers for single-device inference
- */
 export function attachAudioHandlers(socket: Socket) {
     socket.on('register', (payload: { deviceId: string }) => {
         socket.data.deviceId = payload?.deviceId;
-        console.log(`[SOCKET] Device registered: ${socket.data.deviceId} (socket: ${socket.id})`);
+        console.log(`[SOCKET] Device registered: ${socket.data.deviceId}`);
         try {
             if (payload?.deviceId) {
                 socket.join(payload.deviceId);
@@ -22,13 +19,11 @@ export function attachAudioHandlers(socket: Socket) {
         }
     });
 
-    // Simple ping-pong for basic clock sync
     socket.on('clock-ping', (clientTimestampNs: number | string, cb?: (res: any) => void) => {
         const serverTime = nowNs();
         if (cb) cb({ serverRecvNs: serverTime.toString(), serverSendNs: serverTime.toString() });
     });
 
-    // Handle audio chunks
     socket.on('audio-chunk', (meta: any, chunk: ArrayBuffer | Buffer) => {
         const deviceId = meta?.deviceId || socket.data.deviceId;
         if (!deviceId) {
@@ -38,9 +33,8 @@ export function attachAudioHandlers(socket: Socket) {
 
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as ArrayBuffer);
         
-        console.log(`[SOCKET] audio-chunk from ${deviceId} size=${buffer.length} bytes`);
+        console.log(`[SOCKET] audio-chunk from ${deviceId}: ${buffer.length} bytes, ${meta.sampleRate}Hz`);
 
-        // Calculate RMS and convert to Float32 for inference
         let rms = 0;
         let samples: Float32Array | undefined;
         
@@ -59,12 +53,10 @@ export function attachAudioHandlers(socket: Socket) {
             samples = float32Samples;
         }
 
-        // Send to inference if active
         if (inferenceService.isInferenceActive() && samples) {
             inferenceService.addAudioChunk(samples, nowNs(), meta.sampleRate || 48000);
         }
 
-        // Broadcast to monitors
         socket.nsp.to('processors').emit('aligned-chunk', {
             deviceId,
             seq: meta.seq,

@@ -33,3 +33,4 @@ coverage/
 .cache/
 tmp/
 temp/
+debug/
