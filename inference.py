@@ -42,18 +42,6 @@ def segment_fixed(y, sr, fixed_len=FIXED_LEN):
         segments.append(segment)
     return segments
 
-def extract_logmel(y, sr):
-    mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP)
-    logmel = librosa.power_to_db(mel, ref=np.max)
-    return logmel
-
-def pad_logmel(logmel, max_T=MAX_T):
-    if logmel.shape[1] < max_T:
-        logmel = np.pad(logmel, ((0,0),(0,max_T - logmel.shape[1])))
-    elif logmel.shape[1] > max_T:
-        logmel = logmel[:, :max_T]
-    return logmel
-
 # ---- Real-time preprocessing ----
 def preprocess_single_segment(segment, sr=SR, max_T=MAX_T):
     """Convert a fixed-length audio segment to normalized log-Mel tensor."""
