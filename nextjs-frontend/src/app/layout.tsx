@@ -1,12 +1,12 @@
 import React from 'react';
 import './globals.css';
-import Header from '../components/Header';
+// Header removed — monitor page will show its own controls
 
-const Layout = ({ children }) => {
+const Layout = ({ children }: { children: React.ReactNode }) => {
     return (
         <html lang="en">
             <body>
-                <Header />
+                {/* top header removed */}
                 {children}
             </body>
         </html>

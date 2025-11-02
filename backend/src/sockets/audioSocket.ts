@@ -1,8 +1,11 @@
 import { Socket } from 'socket.io';
 import * as syncService from '../services/syncService';
 import * as audioService from '../services/audioService';
+import * as calibrationService from '../services/calibrationService';
+import { alignmentBuffer } from '../services/alignmentBuffer';
 import { nowNs, nsToMsFloat } from '../utils/time';
 import type { AudioChunkMeta } from '../types';
+import { registerDevice, unregisterDevice } from '../services/socketServer';
 
 /**
  * Attach handlers to a connected socket.
@@ -14,6 +17,17 @@ export function attachAudioHandlers(socket: Socket) {
     socket.on('register', (payload: { deviceId: string }) => {
         socket.data.deviceId = payload?.deviceId;
         console.log(`[SOCKET] Device registered: ${socket.data.deviceId} (socket: ${socket.id})`);
+        try {
+            // join a room for direct device messages
+            if (payload?.deviceId) {
+                socket.join(payload.deviceId);
+                registerDevice(payload.deviceId, socket.id);
+            }
+            // notify processors/monitors that a device joined
+            socket.nsp.to('processors').emit('device-joined', { deviceId: payload?.deviceId });
+        } catch (e) {
+            console.warn('Error emitting device-joined', e);
+        }
     });
 
     // Client sends its computed offset (serverEpochNs - clientEpochNs)
@@ -70,6 +84,50 @@ export function attachAudioHandlers(socket: Socket) {
             audioService.pushChunk(metaTyped, buffer, alignedServerNs);
         syncService.touch(deviceId);
 
+        // Add to alignment buffer for synchronized processing
+        alignmentBuffer.addChunk({
+            deviceId,
+            buffer,
+            alignedServerNs,
+            seq: metaTyped.seq || 0,
+            sampleRate: metaTyped.sampleRate || 48000,
+            channels: metaTyped.channels || 1
+        });
+
+        // Calculate RMS (Root Mean Square) audio level for visualization
+        let rms = 0;
+        let samples: Float32Array | undefined;
+        
+        if (buffer.length > 0) {
+            // Assuming Int16 PCM data
+            // Copy buffer to ensure proper alignment for Int16Array
+            const alignedBuffer = Buffer.from(buffer);
+            const int16Samples = new Int16Array(alignedBuffer.buffer, alignedBuffer.byteOffset, alignedBuffer.length / 2);
+            
+            // Convert to Float32 for processing
+            const float32Samples = new Float32Array(int16Samples.length);
+            let sum = 0;
+            for (let i = 0; i < int16Samples.length; i++) {
+                const normalized = int16Samples[i] / 32768.0; // Normalize to -1.0 to 1.0
+                float32Samples[i] = normalized;
+                sum += normalized * normalized;
+            }
+            rms = Math.sqrt(sum / int16Samples.length);
+            
+            // Store samples for calibration
+            if (calibrationService.isCalibrating()) {
+                samples = float32Samples;
+            }
+        }
+
+        // Check if we're in calibration mode and process for peak detection
+        if (calibrationService.isCalibrating()) {
+            calibrationService.processChunkForCalibration(deviceId, alignedServerNs, rms, samples);
+        } else {
+            // Update baseline when not calibrating (learning quiet background noise)
+            calibrationService.updateBaseline(deviceId, rms);
+        }
+
         // Optionally broadcast aligned info to processors
             socket.nsp.to('processors').emit('aligned-chunk', {
             deviceId,
@@ -79,7 +137,8 @@ export function attachAudioHandlers(socket: Socket) {
             sampleRate: metaTyped.sampleRate,
             channels: metaTyped.channels,
             format: metaTyped.format,
-            length: buffer.length
+            length: buffer.length,
+            rms: rms
         });
     });
 
@@ -87,8 +146,36 @@ export function attachAudioHandlers(socket: Socket) {
         socket.join('processors');
     });
 
+    socket.on('mic-permission', (payload: { granted: boolean }) => {
+        const deviceId = socket.data.deviceId;
+        if (deviceId) {
+            console.log(`[SOCKET] Mic permission ${payload?.granted ? 'granted' : 'denied'} for ${deviceId}`);
+            // Import phaseService to mark mic confirmed
+            const phaseService = require('../services/phaseService');
+            if (payload?.granted) {
+                phaseService.markMicConfirmed(deviceId);
+            }
+        }
+    });
+
+    socket.on('keyboard-key', (payload: any) => {
+        const deviceId = socket.data.deviceId;
+        if (deviceId) {
+            console.log(`[SOCKET] Keyboard key from ${deviceId}:`, payload);
+            // Import phaseService to record keypress
+            const phaseService = require('../services/phaseService');
+            phaseService.recordKeypress(deviceId, payload);
+        }
+    });
+
     socket.on('disconnect', () => {
-        // nothing fancy for now
+        const deviceId = socket.data.deviceId;
+        if (deviceId) {
+            console.log(`[SOCKET] Device disconnected: ${deviceId} (socket: ${socket.id})`);
+            unregisterDevice(deviceId);
+            // notify processors/monitors that a device left
+            socket.nsp.to('processors').emit('device-left', { deviceId });
+        }
     });
 }
 
