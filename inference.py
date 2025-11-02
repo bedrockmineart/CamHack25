@@ -178,7 +178,7 @@ class KeyCNN(nn.Module):
         x = self.classifier(x)
         return x
 
-  model_path = ''
+model_path = 'https://github.com/bedrockmineart/CamHack25/blob/main/CamHack25Model%20(1).pth'
 
 model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)  # adjust num_classes and dropout if needed
 checkpoint = torch.load(model_path, weights_only=False)
