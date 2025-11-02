@@ -72,37 +72,6 @@ def preprocess_audio_for_inference(audio_path, sr=SR, fixed_len=FIXED_LEN, max_T
     X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(1)  # (N,1,64,max_T)
     return X_tensor
 
-# ========================
-# DATA PREPARATION
-# ========================
-
-X, y = [], []
-
-for dataset_dir in DATASETS:
-    full_path = os.path.join(ROOT_DIR, dataset_dir)
-    if not os.path.exists(full_path):
-        print(f"⚠️ Skipping missing folder: {full_path}")
-        continue
-
-    print(f"📂 Processing dataset: {dataset_dir}")
-    for file in tqdm(os.listdir(full_path)):
-        if not file.lower().endswith(('.wav', '.m4a', '.mp3')):
-            continue
-        label = os.path.splitext(file)[0]
-        path = os.path.join(full_path, file)
-        audio, sr = librosa.load(path, sr=SR)
-        segments = segment_fixed(audio, sr)
-        for seg in segments:
-            logmel = extract_logmel(seg, sr)
-            logmel = pad_logmel(logmel, MAX_T)
-            X.append(logmel)
-            y.append(label)
-
-X = np.stack(X)
-y = np.array(y)
-np.savez("features.npz", X=X, y=y)
-print("✅ Saved features.npz:", X.shape, y.shape)
-
 class KeyDataset(Dataset):
     def __init__(self, npz_file, mean=None, std=None):
         data = np.load(npz_file, allow_pickle=True)
@@ -183,9 +152,6 @@ model_path = 'https://github.com/bedrockmineart/CamHack25/blob/main/CamHack25Mod
 model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)  # adjust num_classes and dropout if needed
 checkpoint = torch.load(model_path, weights_only=False)
 model.load_state_dict(checkpoint["model_state"])
-
-import torch
-import numpy as np
 
 def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None, device=None):
     """
