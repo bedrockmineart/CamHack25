@@ -157,7 +157,7 @@ checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_on
 model.load_state_dict(checkpoint["model_state"])
 
 
-def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None, device=None):
+def run_model(segment, model=None, norm=True, mean=None, std=None, label_encoder=None, device=None):
     """
     Predict the label of a single fixed-length audio segment.
 
@@ -171,6 +171,12 @@ def run_model(segment, model, norm=True, mean=None, std=None, label_encoder=None
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    if model is None:
+        model_path = 'https://github.com/bedrockmineart/CamHack25/blob/main/CamHack25Model%20(1).pth'
+        model = KeyCNN(num_classes=30, n_mels=N_MELS, max_T=MAX_T, dropout=0)
+        checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
+        model.load_state_dict(checkpoint["model_state"])
+        
     # --- default label encoder ---
     if label_encoder is None:
         label_encoder = np.array([
